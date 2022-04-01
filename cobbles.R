@@ -1,6 +1,8 @@
 library(osmdata)
 library(tidyverse)
 library(leaflet)
+library(elevatr)
+library(sp)
 
 
 
@@ -59,22 +61,31 @@ test_road_coords = as.matrix(test_road$geometry$`3328699`) %>%
   as_tibble()
 
 
-geodesic_distance_meters(
-  test_road_coords$lon[1], 
-  test_road_coords$lat[1], 
-  test_road_coords$lon[nrow(test_road_coords)], 
-  test_road_coords$lat[nrow(test_road_coords)])
 
 
 
 
 
 
-distances = tibble(dist = rep(NA_real_, nrow(roads)))
+
+
+
+
+# compute distances
+
+distances = data.frame(osm_id = roads$osm_id, name = roads$name) %>% 
+  mutate(
+    dist = NA_real_,
+    lon_init = NA_real_,
+    lat_init = NA_real_,
+    lon_end = NA_real_,
+    lat_end = NA_real_
+  )
+
 
 for(i in 1:nrow(roads)){
   
-  if(i %% 10 == 1) print(i)
+  if(i %% 100 == 1) print(i)
   
   road_i <- roads[i,]
   
@@ -91,23 +102,87 @@ for(i in 1:nrow(roads)){
     road_i_coords$lat[nrow(road_i_coords)])
   
   distances$dist[i] = dist_i
+  distances$lon_init[i] = road_i_coords$lon[1] 
+  distances$lat_init[i] = road_i_coords$lat[1]
+  distances$lon_end[i] = road_i_coords$lon[nrow(road_i_coords)] 
+  distances$lat_end[i] = road_i_coords$lat[nrow(road_i_coords)]
+  
 }
 
 
-distances2 = distances %>% 
-  mutate(osm_id = roads$osm_id,
-         name = roads$name)
 
 
 
+# compute elevations
+
+
+# I think I did this part overly complicated, but it works in the end
+coords_elev = distances %>% 
+  select(osm_id, starts_with("lon")) %>% 
+  pivot_longer(cols = lon_init:lon_end, names_to = "lon", values_to = "value_lon") %>% 
+  inner_join(
+    distances %>% 
+      select(osm_id, starts_with("lat")) %>% 
+      pivot_longer(cols = lat_init:lat_end, names_to = "lat", values_to = "value_lat")
+  ) %>% 
+  filter(substring(lon, 4) == substring(lat, 4))
+
+
+elevations_SpatialPointsDataFrame = get_elev_point(
+  as.data.frame(coords_elev %>% select(value_lon, value_lat)), 
+  prj = '+proj=longlat +datum=WGS84', src = "aws")
+
+
+elevations = coords_elev %>% 
+  mutate(elevation = elevations_SpatialPointsDataFrame$elevation) %>% 
+  group_by(osm_id) %>% 
+  summarize(min_elev = min(elevation), max_elev = max(elevation))
+
+  
+
+# merge distances and elevations
+
+
+distances_elevations = distances %>% 
+  full_join(elevations) %>% 
+  mutate(gradient = (max_elev - min_elev)/dist)
+
+
+
+# cobbled streets of more than 200 meters
+roads %>%
+  filter(distances_elevations$dist >= 200) %>% 
+  leaflet() %>% 
+  addTiles() %>% 
+  addPolylines(opacity = 1)
+
+
+# 50 steepest cobbled ascents of more than 100 meters
+distances_elevations %>% 
+  filter(dist > 100) %>% 
+  arrange(desc(gradient)) %>% 
+  head(50)
+
+top_50_more_100 = distances_elevations %>% 
+  filter(dist > 100) %>% 
+  arrange(desc(gradient)) %>% 
+  head(50) %>% 
+  pull(osm_id)
 
 
 
 roads %>%
-  filter(distances2$dist >= 200) %>% 
+  filter(osm_id %in% top_50_more_100) %>% 
   leaflet() %>% 
   addTiles() %>% 
   addPolylines(opacity = 1)
+
+
+
+
+
+
+
 
 
 
